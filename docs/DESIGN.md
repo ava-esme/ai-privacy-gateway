@@ -8,9 +8,10 @@ Generate a qualification summary of a candidate's resume while
 preventing personally identifiable information from being sent
 to the external AI provider.
 
-For Milestone 2, the provider is a deterministic offline mock provider.
-This allows the complete privacy-gateway pipeline to be tested without
-sending any data to an external service.
+For automated gateway testing, the provider is a deterministic offline mock provider.
+This allows the complete privacy-gateway pipeline to be tested without sending
+data to an external service. A real AI model was used separately for the
+Milestone 3 prompt-comparison experiment using only masked synthetic input.
 
 ## 3. Motivation
 Recruiters may want AI assistance summarizing qualifications,
@@ -78,7 +79,7 @@ Initial pattern:
 
 `\d{3}-\d{3}-\d{4}`
 
-The Milestone 2 prototype does not attempt to recognize every possible
+The current implementation does not attempt to recognize every possible
 phone-number format.
 
 ### Physical Address
@@ -93,175 +94,219 @@ Placeholder:
 
 `[[r1:ADDRESS:1]]`
 
-The Milestone 2 prototype will only detect physical addresses that appear
-in the local synthetic term list. It will not attempt to recognize every
+The current implementation only detects physical addresses that appear
+in the local synthetic term list. It does not attempt to recognize every
 possible address format.
 
 ## 5. Success Criteria
 - Supported sensitive values are detected.
-- Sensitive values are replaced locally before they reach the provider.
+- `MASK` values are replaced locally before they reach the provider.
+- `REMOVE` values are deleted before provider processing and are not restored.
+- Missing policy rules default to `MASK`.
+- Invalid policy values produce controlled errors.
 - The placeholder-to-original-value mapping remains local.
 - Repeated sensitive values receive the same placeholder within one request.
 - Different sensitive values within the same category receive different placeholders.
-- The mock provider receives only masked text.
-- The provider response is validated before restoration occurs.
-- Unknown or malformed reserved placeholders produce controlled errors.
-- Valid placeholders are restored locally.
+- Overlapping detections are resolved deterministically.
+- Each request has its own mapping and the mapping is cleared after processing.
+- Foreign-request placeholders are rejected.
+- Provider errors, timeouts, and malformed responses produce controlled errors.
+- No provider or validation failure causes an unmasked fallback.
+- Valid authorized placeholders are restored locally.
 - The final output remains useful for resume qualification analysis.
-- The M1 acceptance cases are implemented as automated tests.
+- Automated and manual evaluation evidence supports the implemented behavior.
 
 ## 6. Non-Goals
-The following are not required for Milestone 2:
+The following are outside the current project scope:
 
 - Hiring decisions
 - Candidate ranking
 - Background checks
 - Sending real employee/applicant data to AI
 - Detecting every possible representation of sensitive information
+- Universal named-entity recognition
 - PDF or DOCX parsing
 - OCR
 - A graphical user interface
-- A live AI API
+- A required live AI API adapter
 - Multi-turn conversations
-- MASK/REMOVE category policy
-- Cross-request isolation testing
-- Prompt comparison
+- Persistent cross-request mappings
+- Production deployment
 
 
-## 7. M2 Scope
-Milestone 2 implements one complete and working privacy-gateway request:
+## 7. Milestone 3 Scope
 
-`Input -> Detection -> Masking -> Offline Mock Provider -> Validation -> Restoration -> Output`
+Milestone 3 implements and evaluates the hardened privacy-gateway flow:
 
-The prototype accepts plain-text resume content through a JSON request.
+`Input -> Detection -> Policy -> Mapping/Masking -> Offline Mock Provider -> Validation -> Restoration -> Mapping Cleanup -> Output`
 
-The Milestone 2 implementation includes:
+The implementation includes:
 
-- NAME, EMAIL, PHONE, and ADDRESS categories
+- `NAME`, `EMAIL`, `PHONE`, and `ADDRESS`
 - Exact matching using local synthetic term lists
 - Structured regular-expression matching
-- Local masking
+- Deterministic overlap resolution
+- `MASK` and `REMOVE` category policies
+- Default `MASK` behavior for missing rules
+- Controlled `INVALID_POLICY` errors
 - Request-local placeholder mappings
-- A deterministic offline mock provider
-- Provider-response validation
-- Local restoration
-- Repeated-value handling
-- Different-entity handling within one request
-- Controlled errors for invalid reserved placeholders
-- Automated acceptance tests
+- Repeated-value and different-entity handling
+- Independent request isolation
+- Mapping cleanup after processing
+- Foreign-request placeholder rejection
+- Unknown and malformed placeholder rejection
+- Provider error and timeout simulation
+- Malformed provider-response handling
+- No unmasked fallback
+- Local restoration of authorized MASK placeholders
 - JSON input and output
-
+- Automated tests
+- Detection metrics and privacy-leak counting
+- Prompt comparison using the same three masked synthetic cases
 
 ## 8. Programming Language Choice
 ### Selected Language: Python
-Python will be used to complete this project because the 
-program deals primarily with text processing, sensitive-information 
-detection and AI integration, all of which are strong in Python. 
+Python was selected because the project primarily performs text processing,
+regular-expression matching, JSON handling, request-local state management,
+testing, and provider-interface simulation.
+
+Python's built-in strings, dictionaries, `re`, `json`, exceptions, dataclasses,
+and `unittest` support allow the gateway components to remain small and
+explainable.
 
 ### Alternative: TypeScript
-Compare at least two relevant differences:
-- Python has a larger NLP and machine learning ecosystem than TypeScript.
-- TypeScript has stronger static typing and the ability to use the same
-language for front-end and back-end, but the text-processing abilities
-and machine learning ecosystem of Python are more relevant to this project.
+Two important trade-offs are:
+
+- TypeScript provides stronger compile-time type checking, while Python relies
+  more heavily on runtime validation, type hints, exceptions, and tests.
+- Python provides concise text-processing and testing support for the current
+  command-line system, while TypeScript would be especially useful if the
+  gateway were later integrated into a larger browser/server web application.
+
+For the current text-processing-focused project, Python remains the better fit.
 
 ## 9. Architecture / Data Flow
+
 ### Local / Trusted System
-1. The local program receives a JSON request containing a request ID and
-   plain-text resume content.
-2. The input is checked for valid JSON fields and reserved placeholder syntax.
-3. The detector finds supported names, email addresses, phone numbers, and
-   physical addresses.
-4. The masker replaces each detected value with a request-specific placeholder.
-5. The original values and placeholders are stored in a request-local map.
-6. Only the masked text is passed to the offline mock provider.
+
+1. `main.py` receives a JSON request.
+2. `pipeline.py` validates the request structure and reserved syntax.
+3. `policy.py` resolves supplied category policies.
+4. Missing policy rules default to `MASK`; invalid policies return a controlled error.
+5. `mapping.py` creates a request-local `RequestMapping`.
+6. `detector.py` finds supported sensitive values.
+7. Overlapping detections are resolved deterministically.
+8. `masker.py` applies `MASK` or `REMOVE`.
+9. `MASK` values receive request-specific placeholders.
+10. `REMOVE` values are deleted and are not entered into the mapping.
+11. Only protected text is passed to the provider.
 
 `---- PROVIDER BOUNDARY ----`
 
 ### Offline Mock Provider
-7. The deterministic offline mock provider receives the masked resume text.
-8. The mock provider returns a predictable response that may contain the same
-   placeholders it received.
+
+12. `mock_provider.py` receives only protected text.
+13. Normal mode returns a deterministic response.
+14. Test modes simulate invalid placeholders, provider errors, timeouts, and malformed responses.
 
 `---- PROVIDER BOUNDARY ----`
 
 ### Local / Trusted System
-9. The validator checks all reserved placeholders in the provider response.
-10. If validation fails, the system returns a controlled error and does not
-    restore values.
-11. If validation succeeds, the restorer replaces valid placeholders with
-    their original values.
-12. The program returns a JSON result containing the masked text, provider
-    response, and final restored output.
 
-The placeholder mapping never crosses the provider boundary.
+15. `pipeline.py` verifies the provider response type.
+16. `validator.py` checks placeholder syntax, request ownership, and whether the current request issued each token.
+17. `restorer.py` restores only valid authorized MASK placeholders.
+18. `REMOVE` values are never restored because they were never stored.
+19. `pipeline.py` returns a successful result or a controlled JSON error.
+20. A `finally` block clears the request mapping after processing.
+
+The placeholder-to-original-value mapping never crosses the provider boundary.
 
 ## 10. Component Responsibilities
-### Input Component
-Reads and validates the JSON request.
 
-The input must contain:
+### `main.py`
+Reads one JSON request from the command line and passes it to the pipeline.
 
-- `request_id`
-- `text`
+### `pipeline.py`
+Coordinates request validation, policy resolution, mapping creation, detection,
+masking/removal, provider invocation, validation, restoration, controlled error
+handling, and guaranteed mapping cleanup.
 
-### Detector
+### `detector.py`
 Finds supported sensitive information.
 
-Detection methods for Milestone 2:
+- `NAME`: exact matching from a local synthetic name list
+- `ADDRESS`: exact matching from a local synthetic address list
+- `EMAIL`: regular-expression pattern
+- `PHONE`: regular-expression pattern
 
-- NAME: exact matching from a local synthetic name list
-- ADDRESS: exact matching from a local synthetic address list
-- EMAIL: regular-expression pattern
-- PHONE: regular-expression pattern
+It also removes duplicate detections and resolves overlaps deterministically.
 
-### Masker
-Replaces detected values with request-specific placeholders.
+### `policy.py`
+Defines the supported category policies:
 
-If the same sensitive value appears multiple times in one request, the masker
-reuses the same placeholder.
+- `MASK`
+- `REMOVE`
 
-Different values within the same category receive different indexes.
+Missing rules default to `MASK`. Invalid categories or values produce
+`INVALID_POLICY`.
 
-### Placeholder Map
-Stores placeholder-to-original-value mappings locally for the current request.
+### `mapping.py`
+Defines `RequestMapping`, which stores request-local placeholder state.
 
-Example:
+It keeps:
 
-`[[r1:NAME:1]] -> Jane Smith`
+- placeholder -> original value
+- `(category, value)` -> placeholder
+- per-category counters
 
-`[[r1:EMAIL:1]] -> jane.smith@example.com`
+Repeated values reuse the same placeholder. The mapping is cleared after the
+request completes.
 
-`[[r1:PHONE:1]] -> 478-555-1234`
+### `masker.py`
+Applies the resolved policy to accepted detections.
 
-`[[r1:ADDRESS:1]] -> 123 Example Street, Sampletown, GA 30000`
+- `MASK`: create/reuse a placeholder and replace the original value.
+- `REMOVE`: delete the value and do not store it in the mapping.
 
-The mapping is not included in the provider request or returned as part of the
-normal JSON output.
+### `mock_provider.py`
+Receives only protected text and returns deterministic responses.
 
-### Offline Mock Provider
-Receives only masked text and returns a deterministic response.
+Test modes simulate:
 
-The mock provider is used instead of a live AI API so the pipeline can be
-tested offline and reproduced consistently.
+- unknown placeholder
+- malformed placeholder
+- foreign-request placeholder
+- missing placeholder
+- modified placeholder
+- malformed provider response
+- provider error
+- provider timeout
 
-### Validator
-Checks reserved placeholders in the mock provider response before restoration.
+### `validator.py`
+Checks placeholder syntax, request ownership, and whether a placeholder was
+actually issued for the current request.
 
-A returned placeholder must:
+Controlled errors include:
 
-1. use the valid reserved placeholder format; and
-2. have been issued for the current request.
+- `INVALID_PLACEHOLDER`
+- `UNKNOWN_PLACEHOLDER`
+- `FOREIGN_REQUEST_PLACEHOLDER`
 
-Malformed or unknown placeholders produce controlled errors.
+### `restorer.py`
+Validates the provider response and restores only authorized MASK placeholders.
+REMOVE values are never restored.
 
-### Restorer
-Restores only valid placeholders after validation succeeds.
+### `evaluation_metrics.py`
+Reports TP, FP, FN, precision, recall, and outbound protected-value leaks for
+labeled synthetic detection cases.
 
-If validation fails, restoration does not occur.
+### `tests/test_pipeline.py`
+Contains the automated Milestone 3 gateway suite. The completed suite contains
+22 passing tests.
 
 ## 11. Placeholder Format
-The Milestone 2 placeholder format is:
+The placeholder format is:
 
 `[[request_id:CATEGORY:index]]`
 
@@ -281,7 +326,7 @@ The parts of the placeholder have the following meanings:
 - `CATEGORY` identifies the sensitive-information category.
 - `index` distinguishes different values within the same category.
 
-Supported Milestone 2 categories are:
+Supported categories are:
 
 - `NAME`
 - `EMAIL`
@@ -321,7 +366,7 @@ Masked result:
 
 `[[r1:NAME:1]] worked with [[r1:NAME:2]].`
 
-## 12. Initial Prompt
+## 12. JSON Input and Output Contract
 ### Input Format
 
 ```json
@@ -342,7 +387,14 @@ Masked result:
 #### `text`
 - Required
 - Type: string
+- Must not be empty
 - Contains the synthetic plain-text resume content to process
+
+#### `policies`
+- Optional
+- Type: object when supplied
+- Supported values: `MASK` and `REMOVE`
+- Missing category rules default to `MASK`
 
 ### Successful Output
 
@@ -377,7 +429,7 @@ The supported status values are:
 - `ok`
 - `error`
 
-### M2 Error Codes
+### Controlled Error Codes
 
 #### `INVALID_JSON`
 The input could not be parsed as valid JSON.
@@ -395,8 +447,20 @@ The provider response contains malformed reserved placeholder syntax.
 The provider response contains a well-formed placeholder that was not issued
 for the current request.
 
+#### `FOREIGN_REQUEST_PLACEHOLDER`
+The provider response contains a well-formed placeholder belonging to another request.
+
+#### `INVALID_POLICY`
+The request contains an unsupported category or policy value.
+
+#### `MALFORMED_PROVIDER_RESPONSE`
+The provider returned a non-text response.
+
 #### `PROVIDER_ERROR`
 The offline mock provider failed unexpectedly.
+
+#### `PROVIDER_TIMEOUT`
+The provider exceeded the simulated timeout.
 
 ## 13. Reserved Placeholder Handling
 
@@ -438,100 +502,347 @@ the program returns:
 The system does not perform partial restoration or return an unmasked fallback
 after validation fails.
 
-## 14. Request-Local State
+## 14. Request-Local State and Lifetime
 
-Each request creates its own placeholder mapping.
+Each request creates its own `RequestMapping`.
 
 For example:
 
-`[[r1:NAME:1]] -> Jane Smith`
+`r13 -> [[r13:NAME:1]]`
 
-`[[r1:ADDRESS:1]] -> 123 Example Street, Sampletown, GA 30000`
+`r14 -> [[r14:NAME:1]]`
 
-The mapping exists locally for the current request and is used during
-restoration after the provider response has been validated.
+Mappings are not shared between requests.
 
-Cross-request isolation is not part of the required Milestone 2 scope and will
-be handled in a later milestone.
+The request-local mapping is used to:
 
-## 15. Offline Mock Provider Design
+- reuse placeholders for repeated values;
+- verify that returned placeholders were actually issued; and
+- restore original values after validation.
 
-Milestone 2 uses a deterministic offline mock provider instead of a live AI
-service.
+The mapping lifetime ends when request processing ends.
 
-The mock provider's purpose is to simulate the provider step while keeping the
-prototype reproducible and completely offline.
+`pipeline.py` uses a `finally` block to call `request_mapping.clear()`, so
+cleanup occurs after both successful and failed processing paths.
 
-The same masked input should produce the same mock response every time.
+Automated tests verify independent requests, direct mapping cleanup, and
+pipeline cleanup behavior.
 
-The mock provider preserves valid placeholders so that response validation and
-local restoration can be tested.
+## 15. Offline Mock Provider Design and Failure Handling
 
-## 16. Initial Prompt
+The deterministic offline mock provider makes gateway behavior reproducible.
 
-The initial prompt remains:
+It supports normal behavior plus simulated:
 
-You are assisting a recruiter with analyzing a candidate's resume.
+- unknown placeholders;
+- malformed placeholders;
+- foreign-request placeholders;
+- missing placeholders;
+- modified placeholders;
+- malformed non-text responses;
+- provider errors; and
+- provider timeouts.
 
-The resume has been sanitized to protect personally identifiable
-information. Values such as `[[r1:NAME:1]]`, `[[r1:EMAIL:1]]`,
-`[[r1:PHONE:1]]`, and `[[r1:ADDRESS:1]]` are placeholders.
+Provider failures never cause an unmasked retry or fallback.
 
-Do not modify, invent, expand, or remove placeholders.
+Controlled provider errors include:
 
-Analyze only the candidate's professional qualifications.
+- `PROVIDER_ERROR`
+- `PROVIDER_TIMEOUT`
+- `MALFORMED_PROVIDER_RESPONSE`
 
-Provide:
+## 16. Prompt Design and Selected Prompt
 
-1. Education
-2. Relevant experience
-3. Relevant technical skills
-4. Qualifications matching the job requirements
-5. Qualifications that are missing or unclear
+Milestone 3 compared two prompt versions using the same three masked synthetic
+resume cases.
 
-Do not make a hiring decision.
-Do not invent qualifications that are not present in the resume.
+Prompt Version 1 produced useful summaries and preserved placeholders, but it
+introduced minor unsupported interpretation in all three cases.
 
-RESUME:
+Prompt Version 2 was more structured and stayed closer to the supplied facts,
+so it was selected as the preferred prompt.
 
-`{SANITIZED_RESUME}`
+### Selected Prompt: Version 2
 
-For Milestone 2, the offline mock provider does not perform real AI analysis.
-The prompt documents the intended provider behavior and can be used by a later
-provider implementation.
+You are a recruiting assistant evaluating a candidate using only the information provided below.
+
+Return your response using exactly these sections:
+
+Qualification Summary:
+Write 2-3 sentences summarizing the candidate's relevant qualifications.
+
+Key Qualifications:
+- List up to 4 qualifications explicitly supported by the provided information.
+
+Missing Information:
+- List important qualification information that is not provided, if applicable.
+
+Requirements:
+1. Use only facts contained in the provided text.
+2. Do not infer or invent experience, skills, education, certifications, or accomplishments.
+3. Preserve every placeholder exactly as written.
+4. A placeholder such as `[[r1:NAME:1]]` represents protected information. Do not modify, expand, interpret, or replace it.
+5. Do not expose or guess the original value represented by a placeholder.
+6. Keep the response concise and suitable for a recruiter.
+
+Input:
+
+`{MASKED_TEXT}`
+
+The real-model prompt experiment is separate from the deterministic offline
+mock-provider tests.
 
 ## 17. Design Decisions
 
-- The placeholder map is stored locally so original sensitive values are not
-  sent to the provider.
-- The system begins with plain-text resume input so the project remains focused
-  on detection, masking, validation, and restoration.
-- Names and physical addresses use exact matching against local synthetic term
-  lists so their detection behavior is deterministic and easy to test.
+- The placeholder mapping remains local so original protected values are not sent to the provider.
+- Plain-text input keeps the project focused on privacy-gateway behavior rather than document parsing.
+- Names and physical addresses use exact local synthetic term lists so detection is deterministic and explainable.
 - Email addresses and phone numbers use documented structured patterns.
-- Request IDs are included in placeholders so placeholders can be associated
-  with the request that created them.
-- Repeated sensitive values reuse an existing placeholder instead of creating a
-  new one.
-- Different values within the same category receive separate indexes.
-- The provider is a deterministic offline mock for Milestone 2.
-- Provider responses are validated before any local restoration occurs.
-- JSON is used for program input and output so requests and results have a
-  consistent, testable structure.
-- Reserved `[[...]]` syntax in original input produces a controlled error.
+- Request IDs are included in placeholders so ownership can be checked.
+- Repeated values reuse existing placeholders.
+- Different values within the same category receive different indexes.
+- Overlapping detections are resolved deterministically before masking.
+- Privacy policy is separated from detection.
+- Missing category rules default to `MASK`.
+- `REMOVE` values are not stored in the request mapping.
+- Each request receives a separate mapping.
+- Mappings are cleared after request processing.
+- Provider responses are validated before restoration.
+- Foreign-request placeholders are rejected even when syntactically valid.
+- The provider is a deterministic offline mock so gateway tests are reproducible.
+- Provider failures do not trigger an unmasked retry or fallback.
+- JSON is used for a consistent, testable input/output interface.
+- Reserved `[[...]]` syntax in original input is rejected.
+- Prompt Version 2 was selected because it was more structured and less likely to introduce unsupported interpretation.
 
-## 18. Changes From Milestone 1
+## 18. Milestone 3 Programming-Language Analysis
 
-Milestone 1 defined the intended user, task, privacy boundary, placeholder
-format, and initial design.
+Milestone 3 connects programming-language concepts directly to the implemented
+gateway.
 
-Milestone 2 refines that design into a working prototype by:
+### Types and Contracts
 
-- defining NAME, EMAIL, PHONE, and ADDRESS as the implemented M2 categories;
-- specifying exact term-list detection for names and physical addresses;
-- specifying structured patterns for email addresses and phone numbers;
-- defining the JSON input/output contract;
-- replacing the planned external provider with a deterministic offline mock;
-- defining repeated-value and different-entity behavior;
-- defining response-validation behavior and controlled placeholder errors; and
-- connecting the individual components into one complete request pipeline.
+The system relies on explicit contracts between components.
+
+Examples include:
+
+- `request_id` must be a valid string;
+- `text` must be a non-empty string;
+- `policies` must be a dictionary when supplied;
+- provider output must be text before placeholder validation;
+- placeholders must follow `[[request_id:CATEGORY:index]]`;
+- `Detection` represents one detected sensitive-value occurrence;
+- `MaskingResult` represents the result of policy application; and
+- `process_request()` returns either a successful JSON-style dictionary or a controlled error dictionary.
+
+Python is dynamically typed, so these contracts are enforced through runtime
+checks, constructors, dataclasses, exceptions, and automated tests.
+
+Execution evidence includes:
+
+- invalid JSON -> `INVALID_JSON`
+- invalid request data -> `INVALID_REQUEST`
+- malformed provider type -> `MALFORMED_PROVIDER_RESPONSE`
+- malformed placeholder -> `INVALID_PLACEHOLDER`
+
+### State Lifetime
+
+`RequestMapping` is the main request-local mutable state.
+
+It stores placeholder/value relationships and per-category counters while one
+request is active.
+
+The mapping is required during masking, validation, and restoration, then it is
+cleared in a `finally` block when processing ends.
+
+This limited lifetime reduces unnecessary retention of sensitive state.
+
+Tests verify independent requests, direct mapping cleanup, and pipeline cleanup.
+
+### Effects
+
+Observable effects include:
+
+- reading local synthetic term-list files;
+- mutating request-local mapping dictionaries and counters;
+- invoking the provider interface;
+- simulating provider failure and timeout behavior;
+- command-line JSON input/output; and
+- clearing request-local state.
+
+Keeping these effects separated makes the transformation and validation logic
+easier to test.
+
+### Interfaces
+
+The implementation uses narrow module interfaces:
+
+`pipeline -> detector`
+
+`pipeline -> policy`
+
+`masker -> RequestMapping`
+
+`pipeline -> mock_provider`
+
+`restorer -> validator`
+
+`restorer -> RequestMapping`
+
+Because these responsibilities are separated, provider failure modes can be
+tested without changing detection or masking logic.
+
+### Error Handling
+
+The implementation uses controlled exceptions including:
+
+- `PolicyError`
+- `ValidationError`
+- `MockProviderError`
+- `TimeoutError`
+- `ValueError`
+
+`pipeline.py` converts these failures into stable JSON error results.
+
+Examples include:
+
+- `INVALID_POLICY`
+- `UNKNOWN_PLACEHOLDER`
+- `INVALID_PLACEHOLDER`
+- `FOREIGN_REQUEST_PLACEHOLDER`
+- `PROVIDER_ERROR`
+- `PROVIDER_TIMEOUT`
+- `MALFORMED_PROVIDER_RESPONSE`
+
+This design prevents raw exceptions from becoming the public program interface
+and prevents restoration after validation failure.
+
+## 19. Milestone 3 Policy and Overlap Rules
+
+### MASK and REMOVE
+
+Detection answers what protected values are present.
+
+Policy answers what should happen to each category.
+
+`MASK` replaces the value with a request-local placeholder.
+
+`REMOVE` deletes the value and does not create a mapping entry, so the value
+cannot be restored later.
+
+Missing policy rules default to `MASK`.
+
+Unsupported rules such as `HIDE` produce `INVALID_POLICY`.
+
+### Deterministic Overlap Resolution
+
+The detector uses these rules:
+
+1. Earlier start position wins.
+2. If two detections begin at the same position, the longer match wins.
+3. If start position and length are equal, category priority is used.
+4. A later candidate overlapping an accepted detection is discarded.
+
+Category priority is:
+
+1. `EMAIL`
+2. `PHONE`
+3. `ADDRESS`
+4. `NAME`
+
+This makes overlap behavior reproducible.
+
+## 20. Changes Across Milestones
+
+### Milestone 1
+
+Milestone 1 defined the intended user, task, motivation, sensitive categories,
+placeholder design, language choice, initial architecture, acceptance cases, and
+initial prompt.
+
+### Milestone 2
+
+Milestone 2 created the working prototype with:
+
+- four implemented sensitive categories;
+- exact and structured detection;
+- request-local mappings;
+- repeated-value handling;
+- JSON input/output;
+- deterministic mock-provider behavior;
+- placeholder validation;
+- local restoration; and
+- automated pipeline tests.
+
+### Milestone 3
+
+Milestone 3 added:
+
+- deterministic overlap resolution;
+- `MASK` and `REMOVE` policies;
+- default `MASK` behavior;
+- invalid-policy handling;
+- separate policy and mapping modules;
+- cross-request isolation;
+- foreign-request rejection;
+- guaranteed mapping cleanup;
+- provider timeout and error handling;
+- malformed provider-response handling;
+- missing- and modified-placeholder tests;
+- no unmasked fallback;
+- detection metrics and outbound leak counting;
+- a two-prompt, three-case real-model comparison;
+- selection of Prompt Version 2; and
+- programming-language analysis tied to code and traces.
+
+## 21. Evaluation Evidence
+
+The completed Milestone 3 automated suite produced:
+
+```text
+Ran 22 tests in 0.009s
+
+OK
+```
+
+Summary:
+
+```text
+22 tests executed
+22 tests passed
+0 tests failed
+```
+
+The labeled detection evaluation produced:
+
+```text
+TP: 10
+FP: 0
+FN: 1
+Precision: 1.000
+Recall: 0.909
+Outbound privacy leaks: 1
+```
+
+The one false negative and privacy leak came from the deliberately unsupported
+phone format:
+
+`(478) 555-0199`
+
+Detailed results are documented in `docs/EVALUATION.md`.
+
+## 22. Current Limitations
+
+- Names must appear in the local synthetic name list.
+- Physical addresses must appear in the local synthetic address list.
+- Exact name and address matching is case-sensitive.
+- Phone detection currently supports only `###-###-####`.
+- Parenthesized formats such as `(478) 555-0199` are not detected.
+- The email pattern supports common formats but does not attempt to validate every legal email format.
+- The system is single-turn.
+- Automated gateway tests use an offline mock provider.
+- The mock provider does not perform real qualification analysis.
+- A live AI provider adapter is not required.
+- PDF, DOCX, OCR, and graphical interfaces are not supported.
+- Only synthetic data is used.
+- Correct privacy masking does not guarantee perfectly fact-constrained AI output, so prompt design remains a separate concern.

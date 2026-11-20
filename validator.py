@@ -1,6 +1,11 @@
 import re
 
+from mapping import RequestMapping
+
+
+# =========================================================
 # Valid placeholder pattern
+# =========================================================
 
 VALID_PLACEHOLDER_PATTERN = re.compile(
     r"\[\[(r[1-9]\d*):(NAME|EMAIL|PHONE|ADDRESS):([1-9]\d*)\]\]"
@@ -13,43 +18,59 @@ RESERVED_PLACEHOLDER_PATTERN = re.compile(
     re.DOTALL
 )
 
+
+# =========================================================
 # Validation error
+# =========================================================
 
 class ValidationError(Exception):
     """
     Represents a controlled validation error.
 
-    The code can later be placed directly into the JSON
-    error response.
+    Supported M3 validation errors include:
+
+    INVALID_PLACEHOLDER
+    UNKNOWN_PLACEHOLDER
+    FOREIGN_REQUEST_PLACEHOLDER
     """
 
-    def __init__(self, code: str, message: str):
+    def __init__(
+        self,
+        code: str,
+        message: str
+    ):
         super().__init__(message)
 
         self.code = code
         self.message = message
 
+
+# =========================================================
 # Find reserved placeholders
+# =========================================================
 
 def find_reserved_placeholders(
     response_text: str
 ) -> list[str]:
     """
-    Finds all text using the reserved [[...]] syntax.
+    Finds all complete [[...]] tokens in the provider
+    response.
     """
 
     return RESERVED_PLACEHOLDER_PATTERN.findall(
         response_text
     )
 
-# Check for incomplete reserved syntax
+
+# =========================================================
+# Check incomplete placeholder syntax
+# =========================================================
 
 def check_incomplete_placeholder_syntax(
     response_text: str
 ) -> None:
     """
-    Detects reserved placeholder markers that are not part
-    of a complete [[...]] token.
+    Detects incomplete reserved placeholder syntax.
 
     Examples:
 
@@ -57,10 +78,10 @@ def check_incomplete_placeholder_syntax(
 
     r1:NAME:1]]
 
-    These should be treated as malformed placeholders.
+    These are malformed and produce
+    INVALID_PLACEHOLDER.
     """
 
-    # Remove all complete [[...]] sections.
     text_without_complete_tokens = (
         RESERVED_PLACEHOLDER_PATTERN.sub(
             "",
@@ -68,12 +89,11 @@ def check_incomplete_placeholder_syntax(
         )
     )
 
-    # If any reserved markers remain, the provider returned
-    # incomplete placeholder syntax.
     if (
         "[[" in text_without_complete_tokens
         or "]]" in text_without_complete_tokens
     ):
+
         raise ValidationError(
             code="INVALID_PLACEHOLDER",
             message=(
@@ -82,53 +102,129 @@ def check_incomplete_placeholder_syntax(
             )
         )
 
-# Validate placeholder structure
 
-def validate_placeholder_format(
+# =========================================================
+# Parse placeholder
+# =========================================================
+
+def parse_placeholder(
     placeholder: str
-) -> None:
+) -> tuple[str, str, int]:
     """
-    Verifies that a placeholder follows the required format:
+    Validates and parses one placeholder.
+
+    Required format:
 
     [[request_id:CATEGORY:index]]
 
     Example:
 
     [[r1:NAME:1]]
+
+    Returns:
+
+    request_id, category, index
     """
 
-    if VALID_PLACEHOLDER_PATTERN.fullmatch(
+    match = VALID_PLACEHOLDER_PATTERN.fullmatch(
         placeholder
-    ) is None:
+    )
+
+    if match is None:
 
         raise ValidationError(
             code="INVALID_PLACEHOLDER",
             message=(
                 "Provider response contained malformed "
-                f"reserved placeholder syntax: {placeholder}"
+                f"reserved placeholder syntax: "
+                f"{placeholder}"
             )
         )
 
-# Validate issued placeholder
+    request_id = match.group(1)
+    category = match.group(2)
+    index = int(match.group(3))
 
-def validate_placeholder_exists(
+    return (
+        request_id,
+        category,
+        index
+    )
+
+
+# =========================================================
+# Validate request ownership
+# =========================================================
+
+def validate_request_ownership(
     placeholder: str,
-    placeholder_to_value: dict[str, str]
+    request_mapping: RequestMapping
 ) -> None:
     """
-    Checks that the placeholder was actually issued by the
-    masker for the current request.
+    Rejects placeholders that belong to a different request.
 
     Example:
 
-    Valid:
+    Current request:
+    r2
+
+    Provider returns:
     [[r1:NAME:1]]
 
-    Unknown:
-    [[r1:NAME:999]]
+    Result:
+    FOREIGN_REQUEST_PLACEHOLDER
     """
 
-    if placeholder not in placeholder_to_value:
+    placeholder_request_id, _, _ = (
+        parse_placeholder(
+            placeholder
+        )
+    )
+
+    if (
+        placeholder_request_id
+        != request_mapping.request_id
+    ):
+
+        raise ValidationError(
+            code="FOREIGN_REQUEST_PLACEHOLDER",
+            message=(
+                f"Provider response contained placeholder "
+                f"{placeholder}, which belongs to request "
+                f"{placeholder_request_id} rather than "
+                f"current request "
+                f"{request_mapping.request_id}."
+            )
+        )
+
+
+# =========================================================
+# Validate issued placeholder
+# =========================================================
+
+def validate_placeholder_exists(
+    placeholder: str,
+    request_mapping: RequestMapping
+) -> None:
+    """
+    Checks whether the current request actually issued
+    the placeholder.
+
+    Example:
+
+    Mapping contains:
+    [[r1:NAME:1]]
+
+    Provider returns:
+    [[r1:NAME:999]]
+
+    Result:
+    UNKNOWN_PLACEHOLDER
+    """
+
+    if not request_mapping.contains_placeholder(
+        placeholder
+    ):
 
         raise ValidationError(
             code="UNKNOWN_PLACEHOLDER",
@@ -139,43 +235,54 @@ def validate_placeholder_exists(
             )
         )
 
+
+# =========================================================
 # Main response validator
+# =========================================================
 
 def validate_provider_response(
     response_text: str,
-    placeholder_to_value: dict[str, str]
+    request_mapping: RequestMapping
 ) -> bool:
     """
     Validates all placeholders in a provider response.
 
-    Validation rules:
+    Validation order:
 
-    1. Reserved placeholder syntax must be complete.
-    2. Every [[...]] token must follow the valid format.
-    3. Every valid-looking placeholder must have been issued
-       by the current request.
+    1. Response must be a string.
+    2. Reserved syntax must be complete.
+    3. Every [[...]] token must be well-formed.
+    4. Placeholder request ID must match the current request.
+    5. Placeholder must have been issued by the current request.
 
     Returns True if validation succeeds.
 
     Raises ValidationError if validation fails.
     """
 
-    if not isinstance(response_text, str):
+    if not isinstance(
+        response_text,
+        str
+    ):
+
         raise ValidationError(
             code="INVALID_PLACEHOLDER",
-            message="Provider response must be a string."
+            message=(
+                "Provider response must be a string."
+            )
         )
 
     if not isinstance(
-        placeholder_to_value,
-        dict
+        request_mapping,
+        RequestMapping
     ):
+
         raise TypeError(
-            "placeholder_to_value must be a dictionary."
+            "request_mapping must be a RequestMapping object."
         )
 
     # -----------------------------------------------------
-    # Step 1: Look for incomplete reserved syntax
+    # Step 1: Check incomplete reserved syntax
     # -----------------------------------------------------
 
     check_incomplete_placeholder_syntax(
@@ -183,7 +290,7 @@ def validate_provider_response(
     )
 
     # -----------------------------------------------------
-    # Step 2: Find all reserved [[...]] tokens
+    # Step 2: Find complete reserved tokens
     # -----------------------------------------------------
 
     placeholders = find_reserved_placeholders(
@@ -196,101 +303,199 @@ def validate_provider_response(
 
     for placeholder in placeholders:
 
-        # Must follow the required structure.
-        validate_placeholder_format(
+        # Validates format.
+        parse_placeholder(
             placeholder
         )
 
-        # Must have been issued by this request.
+        # Rejects placeholders from another request.
+        validate_request_ownership(
+            placeholder,
+            request_mapping
+        )
+
+        # Rejects placeholders that were never issued.
         validate_placeholder_exists(
             placeholder,
-            placeholder_to_value
+            request_mapping
         )
 
     return True
 
-# Optional standalone tests
+
+# =========================================================
+# Standalone tests
+# =========================================================
 
 if __name__ == "__main__":
 
-    # This represents the local map produced by masker.py.
-    placeholder_map = {
-        "[[r1:NAME:1]]": "Jane Smith",
-        "[[r1:ADDRESS:1]]":
-            "123 Example Street, Sampletown, GA 30000",
-        "[[r1:EMAIL:1]]":
-            "jane.smith@example.com",
-        "[[r1:PHONE:1]]":
-            "478-555-1234"
-    }
+    # -----------------------------------------------------
+    # Create mapping for request r1
+    # -----------------------------------------------------
 
-    # Test 1: Valid response
+    request_map = RequestMapping(
+        "r1"
+    )
+
+    name_placeholder = (
+        request_map.get_or_create_placeholder(
+            "NAME",
+            "Jane Smith"
+        )
+    )
+
+    email_placeholder = (
+        request_map.get_or_create_placeholder(
+            "EMAIL",
+            "jane.smith@example.com"
+        )
+    )
+
+
+    # =====================================================
+    # TEST 1 - VALID RESPONSE
+    # =====================================================
+
+    print("TEST 1 - VALID RESPONSE")
+    print("-----------------------")
 
     valid_response = (
         "Qualification Summary:\n"
-        "[[r1:NAME:1]] has relevant experience. "
-        "Contact [[r1:EMAIL:1]]."
+        f"{name_placeholder} has relevant experience. "
+        f"Contact {email_placeholder}."
     )
 
-    print("VALID RESPONSE")
-    print("--------------")
-
     try:
+
         validate_provider_response(
             valid_response,
-            placeholder_map
+            request_map
         )
 
-        print("Validation successful.")
+        print(
+            "Validation successful."
+        )
 
     except ValidationError as error:
-        print(f"Error code: {error.code}")
-        print(f"Message: {error.message}")
 
-    # -----------------------------------------------------
-    # Test 2: Unknown placeholder
-    # -----------------------------------------------------
+        print(
+            f"Error code: {error.code}"
+        )
+
+        print(
+            f"Message: {error.message}"
+        )
+
+
+    # =====================================================
+    # TEST 2 - UNKNOWN PLACEHOLDER
+    # =====================================================
+
+    print(
+        "\nTEST 2 - UNKNOWN PLACEHOLDER"
+    )
+    print(
+        "----------------------------"
+    )
 
     unknown_response = (
         "Qualification Summary:\n"
         "[[r1:NAME:999]] has relevant experience."
     )
 
-    print("\nUNKNOWN PLACEHOLDER")
-    print("-------------------")
-
     try:
+
         validate_provider_response(
             unknown_response,
-            placeholder_map
+            request_map
         )
 
-        print("Validation successful.")
+        print(
+            "Validation successful."
+        )
 
     except ValidationError as error:
-        print(f"Error code: {error.code}")
-        print(f"Message: {error.message}")
 
-    # -----------------------------------------------------
-    # Test 3: Malformed placeholder
-    # -----------------------------------------------------
+        print(
+            f"Error code: {error.code}"
+        )
+
+        print(
+            f"Message: {error.message}"
+        )
+
+
+    # =====================================================
+    # TEST 3 - MALFORMED PLACEHOLDER
+    # =====================================================
+
+    print(
+        "\nTEST 3 - MALFORMED PLACEHOLDER"
+    )
+    print(
+        "------------------------------"
+    )
 
     malformed_response = (
         "Qualification Summary:\n"
         "[[r1:NAME]] has relevant experience."
     )
 
-    print("\nMALFORMED PLACEHOLDER")
-    print("---------------------")
-
     try:
+
         validate_provider_response(
             malformed_response,
-            placeholder_map
+            request_map
         )
 
-        print("Validation successful.")
+        print(
+            "Validation successful."
+        )
 
     except ValidationError as error:
-        print(f"Error code: {error.code}")
-        print(f"Message: {error.message}")
+
+        print(
+            f"Error code: {error.code}"
+        )
+
+        print(
+            f"Message: {error.message}"
+        )
+
+
+    # =====================================================
+    # TEST 4 - FOREIGN REQUEST PLACEHOLDER
+    # =====================================================
+
+    print(
+        "\nTEST 4 - FOREIGN REQUEST PLACEHOLDER"
+    )
+    print(
+        "------------------------------------"
+    )
+
+    foreign_response = (
+        "Qualification Summary:\n"
+        "[[r2:NAME:1]] has relevant experience."
+    )
+
+    try:
+
+        validate_provider_response(
+            foreign_response,
+            request_map
+        )
+
+        print(
+            "Validation successful."
+        )
+
+    except ValidationError as error:
+
+        print(
+            f"Error code: {error.code}"
+        )
+
+        print(
+            f"Message: {error.message}"
+        )

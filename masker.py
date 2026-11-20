@@ -1,48 +1,23 @@
 from dataclasses import dataclass
-from collections import defaultdict
-import re
 
 from detector import Detection, detect_sensitive_info
+from mapping import RequestMapping
+from policy import resolve_policies, get_policy
 
-# Request ID pattern
 
-REQUEST_ID_PATTERN = re.compile(r"^r[1-9]\d*$")
-
+# =========================================================
 # Masking result
+# =========================================================
 
 @dataclass
 class MaskingResult:
     masked_text: str
-    placeholder_to_value: dict[str, str]
-    value_to_placeholder: dict[tuple[str, str], str]
+    removed_count: int
 
-# Request ID validation
 
-def validate_request_id(request_id: str) -> None:
-    """
-    Verifies that the request ID follows the required format.
-
-    Valid examples:
-    r1
-    r2
-    r15
-
-    Invalid examples:
-    request1
-    r0
-    R1
-    """
-
-    if not isinstance(request_id, str):
-        raise ValueError("Request ID must be a string.")
-
-    if not REQUEST_ID_PATTERN.fullmatch(request_id):
-        raise ValueError(
-            "Request ID must use the format 'r' followed by "
-            "a positive integer, such as r1."
-        )
-
+# =========================================================
 # Remove duplicate detections
+# =========================================================
 
 def remove_duplicate_detections(
     detections: list[Detection]
@@ -61,6 +36,7 @@ def remove_duplicate_detections(
     seen = set()
 
     for detection in detections:
+
         key = (
             detection.category,
             detection.value,
@@ -69,21 +45,30 @@ def remove_duplicate_detections(
         )
 
         if key not in seen:
+
             seen.add(key)
-            unique_detections.append(detection)
+            unique_detections.append(
+                detection
+            )
 
     return unique_detections
 
-# Overlap check
+
+# =========================================================
+# Temporary overlap check
+# =========================================================
 
 def check_for_overlaps(
     detections: list[Detection]
 ) -> None:
     """
-    Checks whether two detections overlap.
+    Temporarily checks for overlapping detections.
 
-    Full overlap handling belongs to a later milestone, so the
-    M2 masker raises an error rather than masking ambiguous text.
+    Milestone 3 requires deterministic overlap resolution.
+    That logic will be added in the next refinement step.
+
+    For now, this function prevents ambiguous replacements
+    while the policy and mapping refactor is tested.
     """
 
     if not detections:
@@ -102,189 +87,311 @@ def check_for_overlaps(
     for current in sorted_detections[1:]:
 
         if current.start < previous.end:
+
             raise ValueError(
-                "Overlapping sensitive-information detections "
-                "are not supported in Milestone 2."
+                "Overlapping sensitive-information "
+                "detections must be resolved before masking."
             )
 
         previous = current
 
-# Create placeholders
 
-def create_placeholder(
-    request_id: str,
-    category: str,
-    index: int
-) -> str:
-    """
-    Creates a placeholder using the project's documented format.
-
-    Example:
-    [[r1:NAME:1]]
-    """
-
-    return f"[[{request_id}:{category}:{index}]]"
-
+# =========================================================
 # Main masking function
+# =========================================================
 
 def mask_sensitive_info(
     text: str,
     detections: list[Detection],
-    request_id: str
+    request_mapping: RequestMapping,
+    resolved_policies: dict[str, str]
 ) -> MaskingResult:
     """
-    Replaces detected sensitive values with request-specific
-    placeholders.
+    Applies MASK and REMOVE policies to detected sensitive
+    information.
 
-    Repeated occurrences of the same category/value pair reuse
-    the same placeholder.
+    MASK:
+        Replaces the value with a request-local placeholder.
 
-    Different values in the same category receive different
-    placeholder indexes.
+    REMOVE:
+        Removes the value completely and does not create a
+        placeholder mapping.
 
-    Example:
-
-    Jane Smith worked with Jane Smith and John Davis.
-
-    becomes:
-
-    [[r1:NAME:1]] worked with [[r1:NAME:1]]
-    and [[r1:NAME:2]].
+    Repeated MASK values reuse the same placeholder because
+    RequestMapping owns the request-local mapping state.
     """
 
-    validate_request_id(request_id)
+    if not isinstance(text, str):
 
-    # Remove accidental duplicate Detection objects.
-    detections = remove_duplicate_detections(detections)
+        raise ValueError(
+            "Text must be a string."
+        )
 
-    # M2 does not yet resolve overlapping detections.
-    check_for_overlaps(detections)
+    if not isinstance(
+        request_mapping,
+        RequestMapping
+    ):
 
-    # Stores:
-    #
-    # [[r1:NAME:1]] -> Jane Smith
-    #
-    placeholder_to_value = {}
+        raise ValueError(
+            "request_mapping must be a RequestMapping object."
+        )
 
-    # Stores:
-    #
-    # ("NAME", "Jane Smith") -> [[r1:NAME:1]]
-    #
-    value_to_placeholder = {}
+    # -----------------------------------------------------
+    # Remove exact duplicate detections
+    # -----------------------------------------------------
 
-    # Keeps a separate counter for every category.
-    #
-    # Example:
-    # NAME -> 2
-    # EMAIL -> 1
-    # PHONE -> 1
-    #
-    category_counts = defaultdict(int)
+    detections = (
+        remove_duplicate_detections(
+            detections
+        )
+    )
 
-    # Maps each detection position to the placeholder that
-    # should replace it.
+    # -----------------------------------------------------
+    # Temporary overlap protection
+    # -----------------------------------------------------
+
+    check_for_overlaps(
+        detections
+    )
+
+    # -----------------------------------------------------
+    # Build replacement list
+    # -----------------------------------------------------
+
     replacements = []
 
-    # Process detections in their original text order.
+    removed_count = 0
+
     sorted_detections = sorted(
         detections,
-        key=lambda detection: detection.start
+        key=lambda detection: (
+            detection.start,
+            detection.end
+        )
     )
 
     for detection in sorted_detections:
 
-        value_key = (
-            detection.category,
-            detection.value
+        category = detection.category
+
+        policy = get_policy(
+            category,
+            resolved_policies
         )
 
-        # -------------------------------------------------
-        # Repeated sensitive value
-        # -------------------------------------------------
+        # =================================================
+        # MASK
+        # =================================================
 
-        if value_key in value_to_placeholder:
-            placeholder = value_to_placeholder[value_key]
+        if policy == "MASK":
 
-        # -------------------------------------------------
-        # New sensitive value
-        # -------------------------------------------------
-
-        else:
-            category_counts[detection.category] += 1
-
-            placeholder = create_placeholder(
-                request_id=request_id,
-                category=detection.category,
-                index=category_counts[detection.category]
+            placeholder = (
+                request_mapping.get_or_create_placeholder(
+                    category=category,
+                    value=detection.value
+                )
             )
 
-            value_to_placeholder[value_key] = placeholder
+            replacement_text = placeholder
 
-            placeholder_to_value[placeholder] = detection.value
+        # =================================================
+        # REMOVE
+        # =================================================
+
+        elif policy == "REMOVE":
+
+            # REMOVE values are not added to the request
+            # mapping and therefore cannot be restored later.
+            replacement_text = ""
+
+            removed_count += 1
+
+        # This should never occur because policy.py already
+        # validates policy values.
+        else:
+
+            raise ValueError(
+                f"Unexpected policy: {policy}"
+            )
 
         replacements.append(
             (
                 detection.start,
                 detection.end,
-                placeholder
+                replacement_text
             )
         )
 
     # -----------------------------------------------------
-    # Replace text from right to left
+    # Apply replacements from right to left
     # -----------------------------------------------------
     #
-    # Replacing from the end prevents earlier character
-    # positions from changing while replacements are made.
+    # Replacing from the end prevents an earlier replacement
+    # from changing the character positions of later ones.
     # -----------------------------------------------------
 
     masked_text = text
 
-    for start, end, placeholder in reversed(replacements):
+    for (
+        start,
+        end,
+        replacement_text
+    ) in reversed(replacements):
+
         masked_text = (
             masked_text[:start]
-            + placeholder
+            + replacement_text
             + masked_text[end:]
         )
 
     return MaskingResult(
         masked_text=masked_text,
-        placeholder_to_value=placeholder_to_value,
-        value_to_placeholder=value_to_placeholder
+        removed_count=removed_count
     )
 
-# Optional standalone test
+
+# =========================================================
+# Optional standalone tests
+# =========================================================
 
 if __name__ == "__main__":
 
     sample_text = (
         "Jane Smith lives at "
         "123 Example Street, Sampletown, GA 30000. "
-        "Jane Smith has 3 years of Python experience. "
-        "Contact Jane Smith at jane.smith@example.com "
+        "Contact Jane Smith at "
+        "jane.smith@example.com "
         "or 478-555-1234. "
         "John Davis worked with Jane Smith."
     )
 
-    request_id = "r1"
+    # -----------------------------------------------------
+    # Detect sensitive information
+    # -----------------------------------------------------
 
-    # Run the detector first
-    detections = detect_sensitive_info(sample_text)
-
-    # Send detector results to the masker
-    result = mask_sensitive_info(
-        text=sample_text,
-        detections=detections,
-        request_id=request_id
+    detections = detect_sensitive_info(
+        sample_text
     )
 
-    print("Original text:")
+    # =====================================================
+    # TEST 1 - DEFAULT MASK POLICIES
+    # =====================================================
+
+    print("TEST 1 - DEFAULT MASK POLICIES")
+    print("------------------------------")
+
+    request_map_1 = RequestMapping(
+        "r1"
+    )
+
+    default_policies = resolve_policies(
+        None
+    )
+
+    result_1 = mask_sensitive_info(
+        text=sample_text,
+        detections=detections,
+        request_mapping=request_map_1,
+        resolved_policies=default_policies
+    )
+
+    print("\nOriginal text:")
     print(sample_text)
 
     print("\nMasked text:")
-    print(result.masked_text)
+    print(result_1.masked_text)
 
-    print("\nLocal placeholder map:")
+    print("\nLocal mapping:")
 
-    for placeholder, original_value in result.placeholder_to_value.items():
-        print(f"{placeholder} -> {original_value}")
+    for (
+        placeholder,
+        original_value
+    ) in request_map_1.placeholder_to_value.items():
+
+        print(
+            f"{placeholder} -> "
+            f"{original_value}"
+        )
+
+    print(
+        "\nRemoved values:",
+        result_1.removed_count
+    )
+
+
+    # =====================================================
+    # TEST 2 - MIXED MASK / REMOVE POLICIES
+    # =====================================================
+
+    print("\n\nTEST 2 - MIXED MASK / REMOVE")
+    print("----------------------------")
+
+    request_map_2 = RequestMapping(
+        "r2"
+    )
+
+    mixed_policies = resolve_policies(
+        {
+            "NAME": "MASK",
+            "EMAIL": "REMOVE",
+            "PHONE": "REMOVE",
+            "ADDRESS": "MASK"
+        }
+    )
+
+    result_2 = mask_sensitive_info(
+        text=sample_text,
+        detections=detections,
+        request_mapping=request_map_2,
+        resolved_policies=mixed_policies
+    )
+
+    print("\nMasked text:")
+    print(result_2.masked_text)
+
+    print("\nLocal mapping:")
+
+    for (
+        placeholder,
+        original_value
+    ) in request_map_2.placeholder_to_value.items():
+
+        print(
+            f"{placeholder} -> "
+            f"{original_value}"
+        )
+
+    print(
+        "\nRemoved values:",
+        result_2.removed_count
+    )
+
+
+    # =====================================================
+    # TEST 3 - VERIFY REMOVED VALUES ARE NOT MAPPED
+    # =====================================================
+
+    print(
+        "\n\nTEST 3 - REMOVED VALUES ARE NOT MAPPED"
+    )
+    print(
+        "---------------------------------------"
+    )
+
+    print(
+        "Email stored in mapping:",
+        any(
+            value == "jane.smith@example.com"
+            for value
+            in request_map_2.placeholder_to_value.values()
+        )
+    )
+
+    print(
+        "Phone stored in mapping:",
+        any(
+            value == "478-555-1234"
+            for value
+            in request_map_2.placeholder_to_value.values()
+        )
+    )

@@ -2,18 +2,22 @@
 
 ## 1. Evaluation Goal
 
-The goal of the evaluation is to verify that the Milestone 2 privacy gateway:
+The goal of the evaluation is to verify that the Milestone 3 AI Privacy Gateway:
 
 - detects the supported sensitive-information categories;
-- masks sensitive values before they reach the provider;
+- masks or removes protected values before they reach the provider;
 - preserves repeated sensitive values correctly;
 - distinguishes different sensitive entities;
+- resolves overlapping detections deterministically;
+- keeps request mappings separate and releases request-local state after processing;
 - validates provider responses before restoration;
-- restores only valid placeholders;
-- returns controlled errors for invalid input or provider behavior; and
-- produces useful final output while keeping the placeholder mapping local.
+- rejects malformed, unknown, and foreign-request placeholders;
+- handles provider errors, timeouts, and malformed responses without an unmasked fallback;
+- restores only valid MASK placeholders;
+- does not restore REMOVE values; and
+- produces useful AI output while preserving the privacy boundary.
 
-The supported Milestone 2 sensitive-information categories are:
+The supported sensitive-information categories are:
 
 - `NAME`
 - `EMAIL`
@@ -24,52 +28,79 @@ All test data is synthetic.
 
 ---
 
-## 2. Test Environment
+## 2. Evaluation Environment
 
-The prototype is implemented in Python and tested from the command line.
+The gateway is implemented in Python and tested from the command line.
 
 The automated test suite is located in:
 
 `tests/test_pipeline.py`
 
-The test suite is run with:
+Run the automated tests with:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Observed result:
+The detection-metrics evaluation is located in:
 
-```text
-Ran 10 tests in 0.003s
+`evaluation_metrics.py`
 
-OK
+Run it with:
+
+```bash
+python evaluation_metrics.py
 ```
 
-All 10 automated tests passed.
+The automated privacy-gateway tests use the deterministic offline mock provider.
+
+A real AI model was used separately for the prompt-comparison experiment. Only masked synthetic input was used for that experiment.
 
 ---
 
-## 3. Milestone 1 Acceptance Cases
+## 3. Planned and Executed Evaluation Coverage
 
-The four acceptance cases planned during Milestone 1 were converted into automated tests for Milestone 2.
+Milestone 3 expands the Milestone 2 evaluation to include detection accuracy, policy behavior, state lifetime, cross-request isolation, provider failures, response validation, and prompt usefulness.
 
-### Case 1: Normal Input
+The current automated suite includes tests for:
 
-Test:
+- normal supported input;
+- repeated sensitive values;
+- no sensitive information;
+- different entities;
+- deterministic overlap resolution;
+- default MASK behavior;
+- REMOVE behavior;
+- invalid policy values;
+- unknown placeholders;
+- malformed placeholders;
+- foreign-request placeholders;
+- independent requests;
+- mapping cleanup;
+- reserved placeholder syntax in original input;
+- provider errors;
+- provider timeouts;
+- malformed provider responses; and
+- invalid JSON.
 
-`test_normal_input`
+Two additional response cases required by the M3 evaluation plan were also executed:
+
+- provider response with a missing previously issued placeholder;
+- provider response with a modified previously issued placeholder.
+
+Both cases passed.
+
+---
+
+## 4. Milestone 1 and Milestone 2 Acceptance Cases
+
+The original acceptance cases remain part of the M3 regression suite.
+
+### Normal Input
 
 Purpose:
 
-Verify that the system detects and masks supported sensitive information, passes only masked information to the provider, and restores valid placeholders in the final output.
-
-Input includes:
-
-- name;
-- physical address;
-- email address; and
-- phone number.
+Verify that supported sensitive values are detected and protected before the provider receives the text, and that valid MASK placeholders are restored locally.
 
 Example input:
 
@@ -78,7 +109,7 @@ Jane Smith lives at 123 Example Street, Sampletown, GA 30000.
 Contact Jane Smith at jane.smith@example.com or 478-555-1234.
 ```
 
-Expected masked values:
+Expected protected values:
 
 ```text
 [[r1:NAME:1]]
@@ -87,193 +118,77 @@ Expected masked values:
 [[r1:PHONE:1]]
 ```
 
-Expected behavior:
-
-- All supported sensitive values are detected.
-- Original sensitive values do not appear in the provider response.
-- Valid placeholders are restored in the final output.
-- The final status is `ok`.
-
 Result:
 
 **PASS**
 
----
-
-### Case 2: Repeated Sensitive Values
-
-Test:
-
-`test_repeated_sensitive_value`
+### Repeated Sensitive Values
 
 Purpose:
 
-Verify that repeated occurrences of the same sensitive value use the same placeholder.
+Verify that repeated occurrences of the same value reuse the same request-local placeholder.
 
-Example input:
+Example:
 
 ```text
 Jane Smith has Python experience.
 Contact Jane Smith at jane.smith@example.com.
 ```
 
-Expected masked result:
-
-```text
-[[r2:NAME:1]] has Python experience.
-Contact [[r2:NAME:1]] at [[r2:EMAIL:1]].
-```
-
-The second occurrence of `Jane Smith` must reuse:
+The repeated name reuses:
 
 ```text
 [[r2:NAME:1]]
 ```
 
-It must not create:
-
-```text
-[[r2:NAME:2]]
-```
+and does not create `[[r2:NAME:2]]`.
 
 Result:
 
 **PASS**
 
----
-
-### Case 3: No Sensitive Information
-
-Test:
-
-`test_no_sensitive_information`
+### No Sensitive Information
 
 Purpose:
 
-Verify that text containing no supported sensitive values is not unnecessarily modified.
+Verify that ordinary text is not unnecessarily changed.
 
-Example input:
+Example:
 
 ```text
 Candidate has four years of Python experience and experience with AWS.
 ```
 
-Expected behavior:
-
-- No placeholders are created.
-- The masked text is identical to the original input.
-- The request still completes successfully.
-
 Result:
 
 **PASS**
-
----
-
-### Case 4: Invalid Placeholder Response
-
-Tests:
-
-- `test_unknown_placeholder_response`
-- `test_malformed_placeholder_response`
-
-Purpose:
-
-Verify that the system does not restore provider responses containing unauthorized or malformed placeholders.
-
-#### Unknown Placeholder
-
-Example:
-
-```text
-[[r4:NAME:999]]
-```
-
-This follows the placeholder format, but it was never issued for the request.
-
-Expected error:
-
-```text
-UNKNOWN_PLACEHOLDER
-```
-
-Result:
-
-**PASS**
-
-#### Malformed Placeholder
-
-Example:
-
-```text
-[[r5:NAME]]
-```
-
-This uses reserved placeholder syntax but does not follow the required format.
-
-Expected error:
-
-```text
-INVALID_PLACEHOLDER
-```
-
-Result:
-
-**PASS**
-
----
-
-## 4. Additional Milestone 2 Tests
-
-Additional tests were added beyond the four original Milestone 1 cases.
 
 ### Different Entities
-
-Test:
-
-`test_different_entities`
 
 Purpose:
 
 Verify that different sensitive values within the same category receive different placeholders.
 
-Example input:
+Example:
 
 ```text
 Jane Smith worked with John Davis on a Python project.
 ```
 
-Expected masked result:
-
-```text
-[[r6:NAME:1]] worked with [[r6:NAME:2]] on a Python project.
-```
-
-Expected behavior:
-
-- `Jane Smith` and `John Davis` receive different placeholders.
-- Both names are restored correctly in the final output.
-
 Result:
 
 **PASS**
 
----
-
-### Reserved Placeholder in Original Input
-
-Test:
-
-`test_reserved_placeholder_in_input`
+### Reserved Placeholder Syntax in Input
 
 Purpose:
 
-Verify that users cannot supply text containing syntax reserved for gateway-generated placeholders.
+Verify that a user cannot supply text containing syntax reserved for gateway-generated placeholders.
 
-Example input:
+Example:
 
 ```text
-Jane Smith worked on [[r7:NAME:1]].
+Jane Smith worked on [[r17:NAME:1]].
 ```
 
 Expected error:
@@ -286,49 +201,11 @@ Result:
 
 **PASS**
 
----
-
-### Provider Failure
-
-Test:
-
-`test_provider_error`
-
-Purpose:
-
-Verify that a simulated provider failure produces a controlled error.
-
-The offline mock provider is run in:
-
-```text
-provider_error
-```
-
-mode.
-
-Expected error:
-
-```text
-PROVIDER_ERROR
-```
-
-The system must not return an unmasked fallback.
-
-Result:
-
-**PASS**
-
----
-
 ### Invalid JSON
 
-Test:
-
-`test_invalid_json`
-
 Purpose:
 
-Verify that malformed JSON input produces a controlled error rather than crashing.
+Verify that malformed JSON produces a controlled error.
 
 Expected error:
 
@@ -342,156 +219,355 @@ Result:
 
 ---
 
-### Missing Required Field
+## 5. Milestone 3 Automated Gateway Tests
 
-Test:
+The M3 suite contains 22 executed automated tests.
 
-`test_missing_text_field`
-
-Purpose:
-
-Verify that a request missing the required `text` field is rejected.
-
-Expected error:
+Observed result:
 
 ```text
-INVALID_REQUEST
-```
-
-Result:
-
-**PASS**
-
----
-
-## 5. Automated Test Results
-
-The complete test run produced:
-
-```text
-test_different_entities (test_pipeline.TestPrivacyGatewayPipeline.test_different_entities) ... ok
-test_invalid_json (test_pipeline.TestPrivacyGatewayPipeline.test_invalid_json) ... ok
-test_malformed_placeholder_response (test_pipeline.TestPrivacyGatewayPipeline.test_malformed_placeholder_response) ... ok
-test_missing_text_field (test_pipeline.TestPrivacyGatewayPipeline.test_missing_text_field) ... ok
-test_no_sensitive_information (test_pipeline.TestPrivacyGatewayPipeline.test_no_sensitive_information) ... ok
-test_normal_input (test_pipeline.TestPrivacyGatewayPipeline.test_normal_input) ... ok
-test_provider_error (test_pipeline.TestPrivacyGatewayPipeline.test_provider_error) ... ok
-test_repeated_sensitive_value (test_pipeline.TestPrivacyGatewayPipeline.test_repeated_sensitive_value) ... ok
-test_reserved_placeholder_in_input (test_pipeline.TestPrivacyGatewayPipeline.test_reserved_placeholder_in_input) ... ok
-test_unknown_placeholder_response (test_pipeline.TestPrivacyGatewayPipeline.test_unknown_placeholder_response) ... ok
-
-----------------------------------------------------------------------
-Ran 10 tests in 0.003s
+Ran 22 tests in 0.009s
 
 OK
 ```
 
 Summary:
 
-- Tests executed: 10
-- Tests passed: 10
+- Tests executed: 22
+- Tests passed: 22
 - Tests failed: 0
+
+### Executed Test Summary
+
+| Test | Purpose | Result |
+|---|---|---|
+| Normal input | Full supported pipeline behavior | PASS |
+| Repeated sensitive value | Reuse same placeholder | PASS |
+| No sensitive information | Leave ordinary text unchanged | PASS |
+| Different entities | Distinct placeholders for distinct values | PASS |
+| Longer overlapping match | Longer same-start detection wins | PASS |
+| Earlier overlapping match | Earlier-starting detection wins | PASS |
+| Missing policies default to MASK | Verify default policy | PASS |
+| REMOVE policy | Removed value is not sent or restored | PASS |
+| Invalid policy | Controlled `INVALID_POLICY` error | PASS |
+| Unknown placeholder | Reject unissued placeholder | PASS |
+| Malformed placeholder | Reject malformed reserved token | PASS |
+| Foreign-request placeholder | Reject another request's placeholder | PASS |
+| Independent requests | Keep mappings isolated | PASS |
+| Mapping clear | Release mapping contents | PASS |
+| Pipeline mapping cleanup | Cleanup occurs after processing | PASS |
+| Reserved placeholder in input | Reject reserved syntax in original input | PASS |
+| Provider error | Controlled provider failure | PASS |
+| Provider timeout | Controlled timeout | PASS |
+| Malformed provider response | Reject non-text provider result | PASS |
+| Invalid JSON | Controlled JSON error | PASS |
+
+### Additional M3 Response Tests
+
+Two additional response cases were added and executed:
+
+| Test | Intended Behavior | Result |
+|---|---|---|
+| Missing placeholder response | Provider omits an issued placeholder; omitted value is not restored | PASS |
+| Modified placeholder response | Provider changes an issued placeholder; changed token is rejected | PASS |
 
 ---
 
-## 6. End-to-End Pipeline Result
+## 6. Deterministic Overlap Evaluation
 
-The complete Milestone 2 pipeline was also executed manually.
+Milestone 3 added deterministic overlap handling.
 
-Input:
+The documented rules are:
 
-```json
-{
-    "request_id": "r1",
-    "text": "Jane Smith lives at 123 Example Street, Sampletown, GA 30000. Jane Smith has 3 years of Python experience. Contact Jane Smith at jane.smith@example.com or 478-555-1234."
-}
-```
+1. Earlier starting position wins.
+2. If two detections begin at the same position, the longer detection wins.
+3. If the start position and length are equal, category priority is used.
+4. A later candidate that overlaps an already accepted detection is discarded.
 
-Masked text:
+### Longer Same-Start Match
 
-```text
-[[r1:NAME:1]] lives at [[r1:ADDRESS:1]]. [[r1:NAME:1]] has 3 years of Python experience. Contact [[r1:NAME:1]] at [[r1:EMAIL:1]] or [[r1:PHONE:1]].
-```
-
-Mock provider response:
+Example candidates:
 
 ```text
-Qualification Summary:
-[[r1:NAME:1]] lives at [[r1:ADDRESS:1]]. [[r1:NAME:1]] has 3 years of Python experience. Contact [[r1:NAME:1]] at [[r1:EMAIL:1]] or [[r1:PHONE:1]].
+123 Example Street
+123 Example Street, Sampletown, GA 30000
 ```
 
-Final locally restored output:
+Both begin at the same position.
+
+Observed winner:
 
 ```text
-Qualification Summary:
-Jane Smith lives at 123 Example Street, Sampletown, GA 30000. Jane Smith has 3 years of Python experience. Contact Jane Smith at jane.smith@example.com or 478-555-1234.
+123 Example Street, Sampletown, GA 30000
 ```
 
 Result:
 
 **PASS**
 
-This demonstrates the complete Milestone 2 flow:
+### Earlier-Starting Match
 
-```text
-Input
-  ->
-Detection
-  ->
-Masking
-  ->
-Offline Mock Provider
-  ->
-Validation
-  ->
-Restoration
-  ->
-Output
-```
+When two detections overlap but one begins earlier, the earlier match is retained.
+
+Result:
+
+**PASS**
 
 ---
 
-## 7. Privacy Boundary Evaluation
+## 7. Policy Evaluation
 
-The normal-input test verifies that original sensitive values do not appear in the mock provider response.
+The gateway supports two category policies:
 
-For the tested request, the provider sees:
+- `MASK`
+- `REMOVE`
+
+### MASK
+
+The sensitive value is replaced with a request-local placeholder before the provider receives the text.
+
+A valid authorized placeholder may be restored locally after provider-response validation succeeds.
+
+### REMOVE
+
+The sensitive value is removed before the provider receives the text.
+
+REMOVE values are not stored in the request mapping and therefore cannot be restored later.
+
+### Missing Policy Rule
+
+If a category is not included in the supplied policy object, the category defaults to:
+
+```text
+MASK
+```
+
+Observed result:
+
+**PASS**
+
+### Invalid Policy Rule
+
+Example invalid policy:
+
+```text
+HIDE
+```
+
+Observed error:
+
+```text
+INVALID_POLICY
+```
+
+Result:
+
+**PASS**
+
+---
+
+## 8. Request State and Mapping Lifetime
+
+Each request receives its own `RequestMapping`.
+
+Testing confirmed that placeholders generated for one request are not shared with another request.
+
+Example:
+
+```text
+Request r13 -> [[r13:NAME:1]]
+Request r14 -> [[r14:NAME:1]]
+```
+
+The pipeline releases request-local mapping state after processing.
+
+The mapping cleanup is placed in a `finally` block, so cleanup occurs after both successful and failed processing paths.
+
+Testing confirmed that a mapping can be cleared to zero stored entries.
+
+Result:
+
+**PASS**
+
+---
+
+## 9. Placeholder Validation and Restoration
+
+The validator distinguishes multiple placeholder conditions.
+
+### Valid Placeholder
+
+Example:
 
 ```text
 [[r1:NAME:1]]
-[[r1:ADDRESS:1]]
-[[r1:EMAIL:1]]
-[[r1:PHONE:1]]
 ```
 
-rather than the original values.
+If the placeholder belongs to the current request and was issued by its mapping, it may be restored.
 
-The local placeholder mapping is not included in the provider request or the successful JSON output.
+Result:
 
-The mapping remains local and is used only after validation succeeds.
+**PASS**
+
+### Unknown Placeholder
+
+Example:
+
+```text
+[[r5:NAME:999]]
+```
+
+The syntax is valid, but the placeholder was never issued for the current request.
+
+Observed error:
+
+```text
+UNKNOWN_PLACEHOLDER
+```
+
+Result:
+
+**PASS**
+
+### Malformed Placeholder
+
+Example:
+
+```text
+[[r11:NAME]]
+```
+
+Observed error:
+
+```text
+INVALID_PLACEHOLDER
+```
+
+Result:
+
+**PASS**
+
+### Foreign-Request Placeholder
+
+Example:
+
+```text
+[[r999:NAME:1]]
+```
+
+When the current request has another request ID, the token is well formed but unauthorized.
+
+Observed error:
+
+```text
+FOREIGN_REQUEST_PLACEHOLDER
+```
+
+Result:
+
+**PASS**
+
+### Missing Placeholder Response
+
+Planned behavior:
+
+If the provider simply omits a placeholder that was present in the masked request, there is no unauthorized token to restore. The response may still pass privacy validation, but the omitted original value cannot be restored.
+
+This is treated as a task-usefulness/restoration issue rather than an outbound privacy leak.
+
+Result:
+
+**PASS**
+
+### Modified Placeholder Response
+
+Planned behavior:
+
+If the provider changes an issued token into a different valid-looking token that was not issued for the request, the modified token must not be restored.
+
+Expected error:
+
+```text
+UNKNOWN_PLACEHOLDER
+```
+
+Result:
+
+**PASS**
 
 ---
 
-## 8. Controlled Error Behavior
+## 10. Provider Failure Evaluation
 
-Milestone 2 includes the following controlled errors:
+The offline mock provider was used to simulate controlled failure modes.
 
-| Error Code | Tested | Result |
-|---|---|---|
-| `INVALID_JSON` | Yes | PASS |
-| `INVALID_REQUEST` | Yes | PASS |
-| `RESERVED_PLACEHOLDER_IN_INPUT` | Yes | PASS |
-| `INVALID_PLACEHOLDER` | Yes | PASS |
-| `UNKNOWN_PLACEHOLDER` | Yes | PASS |
-| `PROVIDER_ERROR` | Yes | PASS |
+### Provider Error
 
-When provider validation fails, the program does not produce a restored final output.
+Observed error:
+
+```text
+PROVIDER_ERROR
+```
+
+Result:
+
+**PASS**
+
+### Provider Timeout
+
+Observed error:
+
+```text
+PROVIDER_TIMEOUT
+```
+
+Result:
+
+**PASS**
+
+### Malformed Provider Response
+
+A non-text response produced:
+
+```text
+MALFORMED_PROVIDER_RESPONSE
+```
+
+Result:
+
+**PASS**
+
+### Malformed Placeholder Response
+
+Observed error:
+
+```text
+INVALID_PLACEHOLDER
+```
+
+Result:
+
+**PASS**
+
+### Foreign Placeholder Response
+
+Observed error:
+
+```text
+FOREIGN_REQUEST_PLACEHOLDER
+```
+
+Result:
+
+**PASS**
+
+In each tested failure case, processing stops with a controlled error. The gateway does not send the original unmasked input as a fallback.
 
 ---
 
-## 9. Detection Methods Evaluated
+## 11. Detection Methods Evaluated
 
-The Milestone 2 prototype uses two detection approaches.
+The system uses two documented detection approaches.
 
 ### Exact Term-List Matching
 
@@ -502,7 +578,7 @@ Used for:
 
 These values are loaded from local synthetic data files.
 
-This makes detection deterministic and easy to reproduce, but it only detects values that appear in the local lists.
+This method is deterministic and reproducible, but it only detects exact values that appear in the local lists.
 
 ### Structured Pattern Matching
 
@@ -511,56 +587,295 @@ Used for:
 - `EMAIL`
 - `PHONE`
 
-Email addresses are detected using a documented regular-expression pattern.
+Email addresses are detected with a regular-expression pattern.
 
-Phone numbers are currently limited to the format:
+Phone numbers currently support:
 
 ```text
 ###-###-####
 ```
 
-The current prototype does not attempt to recognize every possible phone-number or physical-address format.
+---
+
+## 12. Quantitative Detection Evaluation
+
+Detection was evaluated using labeled synthetic cases.
+
+A true positive (TP) is a protected-value occurrence that was correctly detected.
+
+A false positive (FP) is a value incorrectly detected as sensitive.
+
+A false negative (FN) is a labeled sensitive-value occurrence that was not detected.
+
+Precision:
+
+```text
+TP / (TP + FP)
+```
+
+Recall:
+
+```text
+TP / (TP + FN)
+```
+
+### Case 1: Normal Supported Input
+
+Observed result:
+
+```text
+TP: 5
+FP: 0
+FN: 0
+Precision: 1.000
+Recall: 1.000
+Outbound privacy leaks: 0
+```
+
+The repeated name is counted as two separate occurrences.
+
+### Case 2: Repeated Value with Punctuation
+
+Observed result:
+
+```text
+TP: 3
+FP: 0
+FN: 0
+Precision: 1.000
+Recall: 1.000
+Outbound privacy leaks: 0
+```
+
+### Case 3: Unicode Text
+
+The case included Unicode text such as `Résumé`.
+
+Observed result:
+
+```text
+TP: 2
+FP: 0
+FN: 0
+Precision: 1.000
+Recall: 1.000
+Outbound privacy leaks: 0
+```
+
+### Case 4: Unsupported Phone Format
+
+The test used:
+
+```text
+(478) 555-0199
+```
+
+The current detector only supports the documented phone format:
+
+```text
+###-###-####
+```
+
+Observed result:
+
+```text
+TP: 0
+FP: 0
+FN: 1
+Precision: N/A
+Recall: 0.000
+Outbound privacy leaks: 1
+```
+
+False negative:
+
+```text
+('PHONE', '(478) 555-0199', 28, 42)
+```
+
+### Overall Detection Results
+
+```text
+TP: 10
+FP: 0
+FN: 1
+Precision: 1.000
+Recall: 0.909
+Outbound privacy leaks: 1
+```
+
+The single false negative and outbound privacy leak were caused by the deliberately tested unsupported phone-number format.
 
 ---
 
-## 10. Current Limitations
+## 13. Privacy Boundary Evaluation
 
-The following limitations remain at the end of Milestone 2:
+For supported detection formats, original protected values are removed from the outbound provider payload.
+
+MASK values are replaced with placeholders such as:
+
+```text
+[[r1:NAME:1]]
+```
+
+The placeholder-to-original-value mapping remains local.
+
+Across the supported labeled detection cases, there were zero outbound privacy leaks.
+
+One outbound leak occurred in the deliberately unsupported phone-format case because the value was not recognized by the detector.
+
+This shows that the privacy boundary depends on the documented detection coverage. A value that is not detected cannot be protected by the masker.
+
+---
+
+## 14. Prompt Comparison
+
+Two prompt versions were evaluated using the same three synthetic masked resume cases.
+
+The automated gateway tests used the deterministic offline mock provider.
+
+The prompt experiment was performed separately with a real AI model using only masked synthetic input.
+
+The comparison considered:
+
+- task usefulness;
+- required information;
+- output format;
+- correct placeholder preservation; and
+- unsupported or invented information.
+
+### Prompt Version 1
+
+Prompt Version 1 asked for a short qualification summary focused on technical skills, relevant experience, education or training, and overall qualifications. It also instructed the model not to modify placeholders or invent qualifications.
+
+#### Case 1
+
+The response preserved `[[r201:NAME:1]]` and included the programming languages and team web-development project.
+
+However, it added interpretive statements about foundational programming knowledge, teamwork skills, and suitability for entry-level software-development positions or internships.
+
+Result:
+
+**Useful, but contained minor unsupported interpretation.**
+
+#### Case 2
+
+The response preserved `[[r202:NAME:1]]` and included three years of Python development experience, AWS, MySQL, Git, and collaboration.
+
+It also stated that the candidate demonstrated qualifications relevant to collaborative software-development roles.
+
+Result:
+
+**Useful, but contained a minor interpretive conclusion.**
+
+#### Case 3
+
+The response preserved `[[r203:NAME:1]]` and included the Computer Science degree, Java, C++, and missing professional development, certification, and cloud experience.
+
+It also interpreted the education as relevant to entry-level software-development positions and stated that missing experience limited assessment of practical qualifications.
+
+Result:
+
+**Accurate overall, but contained minor unsupported interpretation.**
+
+### Prompt Version 2
+
+Prompt Version 2 required exactly these sections:
+
+```text
+Qualification Summary
+Key Qualifications
+Missing Information
+```
+
+It also explicitly required the model to use only supplied facts, avoid inference, preserve placeholders exactly, and never guess the original protected values.
+
+#### Case 1
+
+The response preserved `[[r201:NAME:1]]`, identified the Computer Science background, programming languages, web technologies, and team-project experience, and clearly separated missing information.
+
+Result:
+
+**Accurate, structured, and no unsupported qualifications were introduced.**
+
+#### Case 2
+
+The response preserved `[[r202:NAME:1]]` and accurately summarized the three years of Python development experience, AWS, MySQL, Git, and collaboration.
+
+Result:
+
+**Accurate, structured, and no unsupported conclusions were introduced.**
+
+#### Case 3
+
+The response preserved `[[r203:NAME:1]]` and accurately summarized the Computer Science degree and Java/C++ skills while keeping missing experience in the Missing Information section.
+
+Result:
+
+**Accurate, structured, and no unsupported qualifications were introduced.**
+
+### Prompt Comparison Result
+
+Prompt Version 2 performed better overall.
+
+Both prompts preserved placeholders correctly and produced useful recruiter-oriented responses. Prompt Version 1 introduced minor interpretive conclusions in all three cases, while Prompt Version 2 remained more closely constrained to the supplied facts.
+
+Prompt Version 2 was selected as the preferred prompt because it:
+
+- preserved all privacy placeholders exactly;
+- used only information supported by the masked input;
+- reduced unsupported inference;
+- produced a consistent recruiter-friendly format; and
+- clearly separated known qualifications from missing information.
+
+The prompt experiment also demonstrates that privacy protection and AI usefulness are separate concerns. The gateway controls what sensitive values may leave the local system, while prompt design affects output quality and factual discipline.
+
+---
+
+## 15. Current Failures and Limitations
+
+The current system has the following documented limitations:
 
 - Names must appear in the local synthetic name list.
 - Physical addresses must appear in the local synthetic address list.
 - Exact name and address matching is case-sensitive.
-- Phone-number detection currently supports only `###-###-####`.
-- The email pattern supports common email formats but is not intended to validate every possible legal email address.
-- Full overlap resolution is not implemented.
-- Cross-request isolation is not yet evaluated.
-- MASK/REMOVE policy is not implemented.
-- A live AI provider is not used.
-- The offline mock provider does not perform real qualification analysis.
-- Prompt usefulness comparison is not part of Milestone 2.
+- Phone detection currently supports only `###-###-####`.
+- `(478) 555-0199` was not detected in the labeled evaluation and produced one outbound privacy leak.
+- The email pattern supports common formats but is not intended to validate every possible legal email format.
+- The system is single-turn.
+- The automated pipeline uses an offline mock provider rather than a live AI API.
+- The mock provider does not perform real qualification analysis.
 - PDF, DOCX, OCR, and graphical interfaces are not supported.
 - Only synthetic data is used.
-
-These limitations are consistent with the intended Milestone 2 scope and will be reconsidered during later milestones where required.
+- Prompt Version 1 demonstrated that successful masking does not guarantee that AI output will avoid unsupported interpretation.
 
 ---
 
-## 11. Milestone 2 Evaluation Conclusion
+## 16. Current M3 Evaluation Conclusion
 
-The Milestone 2 prototype successfully completes one full request through the privacy-gateway pipeline.
+The current Milestone 3 implementation successfully demonstrates the required privacy-gateway behavior for the documented supported formats.
 
-All 10 automated tests passed.
+The automated test result is:
 
-The evaluation shows that the current prototype can:
+```text
+22 tests executed
+22 tests passed
+0 tests failed
+```
 
-- detect the supported sensitive-information categories;
-- replace supported sensitive values with request-specific placeholders;
-- preserve repeated sensitive values;
-- distinguish different entities;
-- prevent original sensitive values from appearing in the normal provider response;
-- validate provider placeholders;
-- reject unknown and malformed placeholders;
-- restore valid values locally; and
-- return controlled errors for tested invalid input and provider failures.
+The quantitative detection result is:
 
-The current results support the conclusion that the Milestone 2 pipeline behaves correctly for the documented synthetic cases and supported input formats.
+```text
+TP: 10
+FP: 0
+FN: 1
+Precision: 1.000
+Recall: 0.909
+Outbound privacy leaks: 1
+```
+
+The single false negative and leak were caused by a deliberately tested unsupported phone-number format.
+
+The prompt comparison showed that both prompt versions preserved privacy placeholders, but Prompt Version 2 produced more consistent, structured, and fact-constrained recruiter output.
+
+The missing-placeholder and modified-placeholder response cases were both executed successfully. With those cases included, the M3 automated suite contains 22 passing tests and the planned M3 evaluation coverage is complete.

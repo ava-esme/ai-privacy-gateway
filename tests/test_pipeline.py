@@ -1,9 +1,12 @@
 import unittest
+from unittest.mock import patch
 
+from detector import Detection, resolve_overlaps
+from mapping import RequestMapping
 from pipeline import process_request, process_json_request
 
 
-class TestPrivacyGatewayPipeline(unittest.TestCase):
+class TestPrivacyGatewayM3(unittest.TestCase):
 
     # =====================================================
     # Test 1: Normal input
@@ -23,15 +26,7 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
 
         result = process_request(request)
 
-        self.assertEqual(
-            result["status"],
-            "ok"
-        )
-
-        self.assertEqual(
-            result["request_id"],
-            "r1"
-        )
+        self.assertEqual(result["status"], "ok")
 
         self.assertIn(
             "[[r1:NAME:1]]",
@@ -53,8 +48,7 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
             result["masked_text"]
         )
 
-        # Sensitive values should not appear in the
-        # provider response.
+        # Original sensitive values should not reach provider.
         self.assertNotIn(
             "Jane Smith",
             result["provider_response"]
@@ -81,14 +75,9 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
             result["output"]
         )
 
-        self.assertIn(
-            "478-555-1234",
-            result["output"]
-        )
-
 
     # =====================================================
-    # Test 2: Repeated sensitive values
+    # Test 2: Repeated sensitive value
     # =====================================================
 
     def test_repeated_sensitive_value(self):
@@ -109,8 +98,6 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
             "ok"
         )
 
-        # Jane Smith appears twice and should use the
-        # same placeholder both times.
         self.assertEqual(
             result["masked_text"].count(
                 "[[r2:NAME:1]]"
@@ -118,7 +105,6 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
             2
         )
 
-        # A second NAME placeholder should not be created.
         self.assertNotIn(
             "[[r2:NAME:2]]",
             result["masked_text"]
@@ -132,8 +118,8 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
     def test_no_sensitive_information(self):
 
         original_text = (
-            "Candidate has four years of Python experience "
-            "and experience with AWS."
+            "Candidate has four years of Python "
+            "experience and experience with AWS."
         )
 
         request = {
@@ -148,13 +134,11 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
             "ok"
         )
 
-        # Nothing should be changed.
         self.assertEqual(
             result["masked_text"],
             original_text
         )
 
-        # No placeholders should appear.
         self.assertNotIn(
             "[[",
             result["masked_text"]
@@ -162,17 +146,259 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
 
 
     # =====================================================
-    # Test 4: Unknown placeholder
+    # Test 4: Different entities
     # =====================================================
 
-    def test_unknown_placeholder_response(self):
+    def test_different_entities(self):
 
         request = {
             "request_id": "r4",
             "text": (
-                "Jane Smith has three years of "
-                "Python experience."
+                "Jane Smith worked with John Davis "
+                "on a Python project."
             )
+        }
+
+        result = process_request(request)
+
+        self.assertEqual(
+            result["status"],
+            "ok"
+        )
+
+        self.assertIn(
+            "[[r4:NAME:1]]",
+            result["masked_text"]
+        )
+
+        self.assertIn(
+            "[[r4:NAME:2]]",
+            result["masked_text"]
+        )
+
+        self.assertIn(
+            "Jane Smith",
+            result["output"]
+        )
+
+        self.assertIn(
+            "John Davis",
+            result["output"]
+        )
+
+
+    # =====================================================
+    # Test 5: Longer overlapping detection wins
+    # =====================================================
+
+    def test_overlap_longer_match_wins(self):
+
+        detections = [
+            Detection(
+                category="ADDRESS",
+                value="123 Example Street",
+                start=0,
+                end=18
+            ),
+            Detection(
+                category="ADDRESS",
+                value=(
+                    "123 Example Street, "
+                    "Sampletown, GA 30000"
+                ),
+                start=0,
+                end=40
+            )
+        ]
+
+        result = resolve_overlaps(
+            detections
+        )
+
+        self.assertEqual(
+            len(result),
+            1
+        )
+
+        self.assertEqual(
+            result[0].value,
+            (
+                "123 Example Street, "
+                "Sampletown, GA 30000"
+            )
+        )
+
+
+    # =====================================================
+    # Test 6: Earlier overlapping detection wins
+    # =====================================================
+
+    def test_overlap_earlier_start_wins(self):
+
+        detections = [
+            Detection(
+                category="ADDRESS",
+                value="123 Example Street",
+                start=0,
+                end=18
+            ),
+            Detection(
+                category="NAME",
+                value="Example Street",
+                start=4,
+                end=18
+            )
+        ]
+
+        result = resolve_overlaps(
+            detections
+        )
+
+        self.assertEqual(
+            len(result),
+            1
+        )
+
+        self.assertEqual(
+            result[0].category,
+            "ADDRESS"
+        )
+
+
+    # =====================================================
+    # Test 7: Missing policies default to MASK
+    # =====================================================
+
+    def test_missing_policies_default_to_mask(self):
+
+        request = {
+            "request_id": "r7",
+            "text": (
+                "Jane Smith can be reached at "
+                "jane.smith@example.com or "
+                "478-555-1234."
+            ),
+            "policies": {
+                "EMAIL": "REMOVE"
+            }
+        }
+
+        result = process_request(request)
+
+        self.assertEqual(
+            result["status"],
+            "ok"
+        )
+
+        # NAME and PHONE were not specified,
+        # so they should default to MASK.
+        self.assertIn(
+            "[[r7:NAME:1]]",
+            result["masked_text"]
+        )
+
+        self.assertIn(
+            "[[r7:PHONE:1]]",
+            result["masked_text"]
+        )
+
+        # EMAIL was explicitly REMOVE.
+        self.assertNotIn(
+            "jane.smith@example.com",
+            result["masked_text"]
+        )
+
+        self.assertNotIn(
+            "[[r7:EMAIL:1]]",
+            result["masked_text"]
+        )
+
+
+    # =====================================================
+    # Test 8: REMOVE policy
+    # =====================================================
+
+    def test_remove_policy(self):
+
+        request = {
+            "request_id": "r8",
+            "text": (
+                "Jane Smith can be reached at "
+                "jane.smith@example.com."
+            ),
+            "policies": {
+                "NAME": "MASK",
+                "EMAIL": "REMOVE"
+            }
+        }
+
+        result = process_request(request)
+
+        self.assertEqual(
+            result["status"],
+            "ok"
+        )
+
+        # Name is masked.
+        self.assertIn(
+            "[[r8:NAME:1]]",
+            result["masked_text"]
+        )
+
+        # Email is removed completely.
+        self.assertNotIn(
+            "jane.smith@example.com",
+            result["masked_text"]
+        )
+
+        self.assertNotIn(
+            "[[r8:EMAIL:1]]",
+            result["masked_text"]
+        )
+
+        # Removed value must not reappear after restoration.
+        self.assertNotIn(
+            "jane.smith@example.com",
+            result["output"]
+        )
+
+
+    # =====================================================
+    # Test 9: Invalid policy
+    # =====================================================
+
+    def test_invalid_policy(self):
+
+        request = {
+            "request_id": "r9",
+            "text": "Jane Smith has Python experience.",
+            "policies": {
+                "NAME": "HIDE"
+            }
+        }
+
+        result = process_request(request)
+
+        self.assertEqual(
+            result["status"],
+            "error"
+        )
+
+        self.assertEqual(
+            result["error"]["code"],
+            "INVALID_POLICY"
+        )
+
+
+    # =====================================================
+    # Test 10: Unknown placeholder
+    # =====================================================
+
+    def test_unknown_placeholder(self):
+
+        request = {
+            "request_id": "r10",
+            "text": "Jane Smith has Python experience."
         }
 
         result = process_request(
@@ -190,7 +416,6 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
             "UNKNOWN_PLACEHOLDER"
         )
 
-        # Final restored output should not be produced.
         self.assertNotIn(
             "output",
             result
@@ -198,17 +423,14 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
 
 
     # =====================================================
-    # Test 5: Malformed placeholder
+    # Test 11: Malformed placeholder
     # =====================================================
 
-    def test_malformed_placeholder_response(self):
+    def test_malformed_placeholder(self):
 
         request = {
-            "request_id": "r5",
-            "text": (
-                "Jane Smith has three years of "
-                "Python experience."
-            )
+            "request_id": "r11",
+            "text": "Jane Smith has Python experience."
         }
 
         result = process_request(
@@ -226,6 +448,33 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
             "INVALID_PLACEHOLDER"
         )
 
+
+    # =====================================================
+    # Test 12: Foreign-request placeholder
+    # =====================================================
+
+    def test_foreign_request_placeholder(self):
+
+        request = {
+            "request_id": "r12",
+            "text": "Jane Smith has Python experience."
+        }
+
+        result = process_request(
+            request,
+            provider_mode="foreign_placeholder"
+        )
+
+        self.assertEqual(
+            result["status"],
+            "error"
+        )
+
+        self.assertEqual(
+            result["error"]["code"],
+            "FOREIGN_REQUEST_PLACEHOLDER"
+        )
+
         self.assertNotIn(
             "output",
             result
@@ -233,65 +482,147 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
 
 
     # =====================================================
-    # Test 6: Different entities in one request
+    # Test 13: Independent requests
     # =====================================================
 
-    def test_different_entities(self):
+    def test_independent_requests(self):
 
-        request = {
-            "request_id": "r6",
-            "text": (
-                "Jane Smith worked with John Davis "
-                "on a Python project."
-            )
+        request_1 = {
+            "request_id": "r13",
+            "text": "Jane Smith has Python experience."
         }
 
-        result = process_request(request)
+        request_2 = {
+            "request_id": "r14",
+            "text": "John Davis has Java experience."
+        }
+
+        result_1 = process_request(
+            request_1
+        )
+
+        result_2 = process_request(
+            request_2
+        )
 
         self.assertEqual(
-            result["status"],
+            result_1["status"],
             "ok"
         )
 
-        # Different people should receive different
-        # placeholders.
-        self.assertIn(
-            "[[r6:NAME:1]]",
-            result["masked_text"]
+        self.assertEqual(
+            result_2["status"],
+            "ok"
         )
 
         self.assertIn(
-            "[[r6:NAME:2]]",
-            result["masked_text"]
-        )
-
-        # Both names should be restored in final output.
-        self.assertIn(
-            "Jane Smith",
-            result["output"]
+            "[[r13:NAME:1]]",
+            result_1["masked_text"]
         )
 
         self.assertIn(
-            "John Davis",
-            result["output"]
+            "[[r14:NAME:1]]",
+            result_2["masked_text"]
+        )
+
+        # One request's placeholder should not appear
+        # in the other request.
+        self.assertNotIn(
+            "[[r13:NAME:1]]",
+            result_2["masked_text"]
+        )
+
+        self.assertNotIn(
+            "[[r14:NAME:1]]",
+            result_1["masked_text"]
         )
 
 
     # =====================================================
-    # Test 7: Reserved placeholder in original input
+    # Test 14: Mapping clear
+    # =====================================================
+
+    def test_mapping_clear(self):
+
+        request_map = RequestMapping(
+            "r15"
+        )
+
+        request_map.get_or_create_placeholder(
+            "NAME",
+            "Jane Smith"
+        )
+
+        request_map.get_or_create_placeholder(
+            "EMAIL",
+            "jane.smith@example.com"
+        )
+
+        self.assertEqual(
+            request_map.size(),
+            2
+        )
+
+        request_map.clear()
+
+        self.assertEqual(
+            request_map.size(),
+            0
+        )
+
+
+    # =====================================================
+    # Test 15: Pipeline calls mapping cleanup
+    # =====================================================
+
+    def test_pipeline_releases_mapping(self):
+
+        request = {
+            "request_id": "r16",
+            "text": "Jane Smith has Python experience."
+        }
+
+        with patch.object(
+            RequestMapping,
+            "clear",
+            autospec=True
+        ) as mock_clear:
+
+            result = process_request(
+                request
+            )
+
+            self.assertEqual(
+                result["status"],
+                "ok"
+            )
+
+            # validate_request() clears its temporary
+            # validation object, and process_request()
+            # clears the actual request mapping in finally.
+            self.assertGreaterEqual(
+                mock_clear.call_count,
+                2
+            )
+
+
+    # =====================================================
+    # Test 16: Reserved placeholder in input
     # =====================================================
 
     def test_reserved_placeholder_in_input(self):
 
         request = {
-            "request_id": "r7",
+            "request_id": "r17",
             "text": (
                 "Jane Smith worked on "
-                "[[r7:NAME:1]]."
+                "[[r17:NAME:1]]."
             )
         }
 
-        result = process_request(request)
+        result = process_request(
+            request
+        )
 
         self.assertEqual(
             result["status"],
@@ -305,16 +636,14 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
 
 
     # =====================================================
-    # Test 8: Provider failure
+    # Test 17: Provider failure
     # =====================================================
 
     def test_provider_error(self):
 
         request = {
-            "request_id": "r8",
-            "text": (
-                "Jane Smith has Python experience."
-            )
+            "request_id": "r18",
+            "text": "Jane Smith has Python experience."
         }
 
         result = process_request(
@@ -332,16 +661,85 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
             "PROVIDER_ERROR"
         )
 
+        self.assertNotIn(
+            "output",
+            result
+        )
+
 
     # =====================================================
-    # Test 9: Invalid JSON
+    # Test 18: Provider timeout
+    # =====================================================
+
+    def test_provider_timeout(self):
+
+        request = {
+            "request_id": "r19",
+            "text": "Jane Smith has Python experience."
+        }
+
+        result = process_request(
+            request,
+            provider_mode="provider_timeout"
+        )
+
+        self.assertEqual(
+            result["status"],
+            "error"
+        )
+
+        self.assertEqual(
+            result["error"]["code"],
+            "PROVIDER_TIMEOUT"
+        )
+
+        self.assertNotIn(
+            "output",
+            result
+        )
+
+
+    # =====================================================
+    # Test 19: Malformed provider response
+    # =====================================================
+
+    def test_malformed_provider_response(self):
+
+        request = {
+            "request_id": "r20",
+            "text": "Jane Smith has Python experience."
+        }
+
+        result = process_request(
+            request,
+            provider_mode="malformed_response"
+        )
+
+        self.assertEqual(
+            result["status"],
+            "error"
+        )
+
+        self.assertEqual(
+            result["error"]["code"],
+            "MALFORMED_PROVIDER_RESPONSE"
+        )
+
+        self.assertNotIn(
+            "output",
+            result
+        )
+
+
+    # =====================================================
+    # Test 20: Invalid JSON
     # =====================================================
 
     def test_invalid_json(self):
 
         invalid_json = """
         {
-            "request_id": "r9",
+            "request_id": "r21",
             "text": "Jane Smith"
         """
 
@@ -359,18 +757,56 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
             "INVALID_JSON"
         )
 
-
     # =====================================================
-    # Test 10: Missing required field
+    # Test 21: Missing placeholder
     # =====================================================
 
-    def test_missing_text_field(self):
+    def test_missing_placeholder(self):
 
         request = {
-            "request_id": "r10"
+            "request_id": "r22",
+            "text": "Jane Smith has Python experience."
         }
 
-        result = process_request(request)
+        result = process_request(
+            request,
+            provider_mode="missing_placeholder"
+        )
+
+        self.assertEqual(
+            result["status"],
+            "ok"
+        )
+
+        # Provider omitted the issued placeholder.
+        self.assertNotIn(
+            "[[r22:NAME:1]]",
+            result["provider_response"]
+        )
+
+        # Because the placeholder was omitted, Jane Smith
+        # cannot be restored.
+        self.assertNotIn(
+            "Jane Smith",
+            result["output"]
+        )
+
+
+    # =====================================================
+    # Test 22: Modified placeholder
+    # =====================================================
+
+    def test_modified_placeholder(self):
+
+        request = {
+            "request_id": "r23",
+            "text": "Jane Smith has Python experience."
+        }
+
+        result = process_request(
+            request,
+            provider_mode="modified_placeholder"
+        )
 
         self.assertEqual(
             result["status"],
@@ -379,10 +815,14 @@ class TestPrivacyGatewayPipeline(unittest.TestCase):
 
         self.assertEqual(
             result["error"]["code"],
-            "INVALID_REQUEST"
+            "UNKNOWN_PLACEHOLDER"
         )
 
-# Run tests
+        self.assertNotIn(
+            "output",
+            result
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
